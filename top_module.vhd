@@ -2,6 +2,7 @@ library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 --use IEEE.NUMERIC_STD.ALL;
 
+
 entity top_module is
     port (
         i_sys_clk : in std_logic;
@@ -17,19 +18,21 @@ entity top_module is
         o_sda : out std_logic;
         o_camera_rst : out std_logic;
         o_pwdn : out std_logic;
+        o_pixel_valid : out std_logic; 
+        o_config_done : out std_logic;
+
+        o_xclk_led : out std_logic;
 
         o_Hsync : out std_logic;
         o_Vsync : out std_logic;
         o_red : out std_logic_vector(3 downto 0);
         o_green : out std_logic_vector(3 downto 0);
-        o_blue : out std_logic_vector(3 downto 0)
+        o_blue : out std_logic_vector(3 downto 0);
+        o_rgb_valid : out std_logic
      );
 end top_module;
 
-architecture Behavioral of top_module is
-
-    attribute CLOCK_BUFFER_TYPE : string;
-    attribute CLOCK_BUFFER_TYPE of i_pclk : signal is "NONE";
+architecture Behavioral of top_module is  
 
     signal rst, n_rst : std_logic;
     signal w_clk_25mhz, w_clk_24mhz : std_logic;
@@ -44,19 +47,24 @@ architecture Behavioral of top_module is
     signal w_fifo_data : std_logic_vector(7 downto 0);
 
 
-    COMPONENT axis_data_fifo_0
-    PORT (
-        s_axis_aresetn : IN STD_LOGIC;
-        s_axis_aclk : IN STD_LOGIC;
-        s_axis_tvalid : IN STD_LOGIC;
-        s_axis_tready : OUT STD_LOGIC;
-        s_axis_tdata : IN STD_LOGIC_VECTOR(7 DOWNTO 0);
-        m_axis_aclk : IN STD_LOGIC;
-        m_axis_tvalid : OUT STD_LOGIC;
-        m_axis_tready : IN STD_LOGIC;
-        m_axis_tdata : OUT STD_LOGIC_VECTOR(7 DOWNTO 0) 
-    );
-    END COMPONENT;
+    signal counter : integer := 0;
+    signal slow_clk : std_logic := '0';
+
+
+
+--    COMPONENT axis_data_fifo_0
+--    PORT (
+--        s_axis_aresetn : IN STD_LOGIC;
+--        s_axis_aclk : IN STD_LOGIC;
+--        s_axis_tvalid : IN STD_LOGIC;
+--        s_axis_tready : OUT STD_LOGIC;
+--        s_axis_tdata : IN STD_LOGIC_VECTOR(7 DOWNTO 0);
+--        m_axis_aclk : IN STD_LOGIC;
+--        m_axis_tvalid : OUT STD_LOGIC;
+--        m_axis_tready : IN STD_LOGIC;
+--        m_axis_tdata : OUT STD_LOGIC_VECTOR(7 DOWNTO 0) 
+--    );
+--    END COMPONENT;
 
     component clk_wiz_0
     port
@@ -73,12 +81,16 @@ architecture Behavioral of top_module is
 
 begin
 
-    o_xclk <= w_clk_24mhz;
-    n_rst <= not (i_rst or not w_locked);
-    rst <= not (n_rst);
+    n_rst <= not i_rst when w_locked = '1' else '0';
+    rst <= i_rst;
 
-    o_camera_rst <= '0'; -- keep it on
+    o_camera_rst <= '1'; -- keep it on
     o_pwdn <= '0'; -- normal mode
+    o_pixel_valid <= w_pixel_data_valid;
+    
+    -- o_rgb_valid <= w_rgb_valid;
+
+    o_xclk <= w_clk_24mhz;
 
     clock_gen_inst : clk_wiz_0
         port map ( 
@@ -92,6 +104,20 @@ begin
             clk_in1 => i_sys_clk
         );
 
+    process(w_clk_24mhz)
+    begin
+        if rising_edge(w_clk_24mhz) then
+            counter <= counter + 1;
+            if counter = 12_000_000 then -- ~1 Hz
+                slow_clk <= not slow_clk;
+                counter <= 0;
+            end if;
+        end if;
+    end process;
+
+    o_xclk_led <= slow_clk;
+    -------- BOTH VGA AND CAMERA ARE RUNNING AT 24MHZ -------------
+    -------- VGA WORKS AT 24MHZ, TESTED USING PATTERN ------------
     -- axis master
     vga_controller_inst : entity work.vga_controller
         generic map (
@@ -100,17 +126,17 @@ begin
             HOR_SYNC_TIME => 96,
             HOR_BACK_PORCH => 48,
             HOR_DISPLAY => 640,
-            HOR_FRONT_PORCH => 16,
-            V_SYNC_TIME => 2,
+            HOR_FRONT_PORCH =>16,
+            V_SYNC_TIME => 2, 
             V_BACK_PORCH => 29,
             V_DISPLAY => 480,
             V_FRONT_PORCH => 10
         )
         port map (
-            i_clk_vga   => w_clk_25mhz,  -- 25 MHz clock
+            i_clk_vga   => w_clk_24mhz,  -- 24 MHz clock
             i_rst       => rst,
-            i_data      => X"FF", --w_fifo_data,
-            i_data_valid => '1', --w_fifo_valid,
+            i_data      => w_pixel_data,
+            i_data_valid => w_pixel_data_valid, --w_fifo_valid,
 
             o_Hsync   => o_Hsync,
             o_Vsync   => o_Vsync,
@@ -130,7 +156,7 @@ begin
         port map (
             i_clk => i_sys_clk,
             i_rst => rst,
-            i_pclk => i_pclk,
+            i_pclk => i_pclk, 
             i_vsync => i_vsync,
             i_href => i_href,
             i_data => i_data,
@@ -138,24 +164,23 @@ begin
             o_scl => o_scl,
             o_sda => o_sda,
             o_pixel_data => w_pixel_data,
-            o_pixel_valid => w_pixel_data_valid
+            o_pixel_valid => w_pixel_data_valid,
+            o_config_done => o_config_done
         );
     
-    axis_fifo_inst : axis_data_fifo_0
-    PORT MAP (
-        --write side (camera)
-        s_axis_aresetn => n_rst,
-        s_axis_aclk => i_pclk, -- 24mhz
-        s_axis_tvalid => w_pixel_data_valid,
-        s_axis_tready => open,
-        s_axis_tdata => w_pixel_data,
-        -- read side (vga) 
-        m_axis_aclk => w_clk_25mhz, -- 25mhz
-        m_axis_tvalid => w_fifo_valid,
-        m_axis_tready => w_display_enable,
-        m_axis_tdata => w_fifo_data
-    );
-
-    
+--    axis_fifo_inst : axis_data_fifo_0
+--    PORT MAP (
+--        --write side (camera)
+--        s_axis_aresetn => n_rst,
+--        s_axis_aclk => i_pclk, -- 24mhz
+--        s_axis_tvalid => w_pixel_data_valid,
+--        s_axis_tready => open,
+--        s_axis_tdata => w_pixel_data,
+--        -- read side (vga) 
+--        m_axis_aclk => w_clk_24mhz, -- 25mhz
+--        m_axis_tvalid => w_fifo_valid,
+--        m_axis_tready => '1',
+--        m_axis_tdata => w_fifo_data
+--    );
 
 end Behavioral;
